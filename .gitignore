@@ -2,3 +2,4 @@
 /data/
 /.idea/
 talking_points.*
+__pycache__/
