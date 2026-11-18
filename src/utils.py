@@ -1,5 +1,6 @@
 import csv
 import json
+import math
 import re
 from pathlib import Path
 
@@ -135,6 +136,47 @@ def origin(question):
         if after:
             return after[0]
     return addrs[0][2]
+
+
+ADDR = re.compile(r"(?:inside (?P<aoi>.+?) )?on the [a-z]+ side of (?P<r1>.+?), (?:within )?\d+m from the [a-z]+ corner"
+                  r" of the junction of (?P<r2>.+?) and (?P<r3>.+)", re.S)
+START = re.compile(r"^(?:In which direction is |How many meters do I need to walk from |What is the distance between | from | to )")
+
+
+def names_in(q):
+    # real names in a no route sr question in the order they appear with True for roads
+    out = []
+    start = 0
+    for i, j, _ in addresses(q):
+        out.append((START.sub("", q[start:i]), False))   # the place right before the bracket
+        m = ADDR.fullmatch(q[i + 1:j])
+        if m["aoi"]:
+            out.append((m["aoi"], False))
+        out += [(m["r1"], True), (m["r2"], True), (m["r3"], True)]
+        start = j + 1
+    tail = re.fullmatch(r" (?:from|and) (.+)\?", q[start:])
+    if tail:
+        out.append((tail.group(1), True))   # rd questions end with a road
+    return [(n, road) for n, road in out if n != "unknown road"]
+
+
+def map_open(pred, it):
+    # maps a free answer from T_open to the closest original option and gives back its letter or None
+    opts = it["options"]
+    if it["kind"] == "dir":
+        word = pred.strip().lower().rstrip(".")
+        hits = [k for k, v in opts.items() if v == word]
+        return hits[0] if hits else None
+    m = re.search(r"-?\d+(?:\.\d+)?", pred.replace(",", ""))
+    if not m:
+        return None
+    v = float(m.group(0))
+    if v <= 0:
+        # a zero or negative guess goes to the closest option on the plain scale
+        return min(opts, key=lambda k: abs(float(opts[k]) - v))
+    # otherwise log distance and options at or below zero can never be closest to a positive guess
+    pos = {k: float(x) for k, x in opts.items() if float(x) > 0}
+    return min(pos, key=lambda k: abs(math.log(pos[k]) - math.log(v)))
 
 
 def write_jsonl(path, rows):

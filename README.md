@@ -8,11 +8,18 @@ Below is what's done so far and how to run it.
 
 ## Setup
 
-Python 3.12. Only the standard library is used so far, so there's nothing to pip install yet. You need around 2.5 GB of disk space (zip, unzipped data and generated files) and ~3 GB of free RAM (step 1 loads the whole Beijing training file).
+Python 3.12. The build scripts only use the standard library. The T_opt check needs numpy and scikit-learn, and scoring and training need torch, transformers and LLaMA-Factory. You need around 2.5 GB of disk space for the data and generated files, about 6 GB more for the packages and models, and ~3 GB of free RAM (step 1 loads the whole Beijing training file).
 
 ```
 git clone https://github.com/Rahulrayy/UC-Project.git
 cd UC-Project
+```
+
+For the scoring and training part install torch with CUDA first and then the rest:
+
+```
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
 ```
 
 ## Getting the data
@@ -46,15 +53,20 @@ There are some .DS_Store files in there from a Mac, you can ignore them. Don't c
 
 ## What's done so far
 
-Three scripts, run them in this order from the repo root:
+The build scripts, run them in this order from the repo root:
 
 ```
 python src/build_train_sets.py
 python src/build_eval_sample.py
 python src/build_topt.py
+python src/build_ffair.py
+python src/build_topen.py
+python src/build_fictional.py
+python src/build_rq4.py
+python src/build_tpara.py
 ```
 
-Everything goes into `data/built/` (also gitignored, just rebuild it). All the random stuff uses seed 0 so you should get exactly the same files. The first script takes about 20 seconds, the other two a few seconds. The expected output is pasted under each step so you can check your run matches.
+Everything goes into `data/built/` (also gitignored, just rebuild it). All the random stuff uses seed 0 so you should get exactly the same files. Most take a few seconds, build_train_sets.py and build_rq4.py about 20 to 30 seconds and build_fictional.py about 2 minutes. The expected output is pasted under each step so you can check your run matches.
 
 ### Step 1: build_train_sets.py
 
@@ -127,15 +139,85 @@ The output should end with this. The old rule should now only be right about 1 i
 wrote 4800 items
 ```
 
+### Step 4: build_ffair.py
+
+Makes f_fair, the fixed training set. It's f_ft with the same items in the same order, but every item where the rank trick works (2,000 distance template items, 200 road_length, 2,497 CityReasoning questions with number options) plus the 193 poi2coor items get fair options the same way as T_opt. In the CityReasoning items the reasoning stays as it is and only the letter after "Answer:" changes. It writes `data/built/train/f_fair.json` and adds f_fair to `dataset_info.json`.
+
+It prints how often the old rule still picks the answer for each kind of item, which should be about 1 in 4 (1 in 5 for road_length, 0.243 overall), and ends with `wrote f_fair 71225`.
+
+### Step 5: build_topen.py
+
+T_open: the same spatial reasoning questions without the options. The model has to answer with a number of meters or one of north, south, east and west, and that answer is mapped to the closest original option (on a log scale for distances, so an option of 0 or less is never picked for a positive answer). The mapping is `map_open` in utils.py. Output is `data/built/eval/topen.jsonl` and it prints `wrote 8000 items`.
+
+### Step 6: build_fictional.py
+
+Fictional places: 100 no route questions per spatial reasoning task (25 per city) where every place, building and road name is swapped for a made up one. A real name that shows up twice in a question gets the same fake name both times. The made up words are checked against every word in the training files and the benchmark csvs. Options and answers stay the same, so nobody can know the answer but the rank trick still works. Output is `data/built/eval/fictional.jsonl` and it prints `real words: 245116` and `items: 1000`.
+
+### Step 7: build_rq4.py
+
+The RQ4 items: no route place to place questions (aoi2aoi, poi2aoi, poi2poi) where both places can be found in the address to coordinate questions of that city's CityQA data. Addresses with "unknown road" or that point to spots more than 200 m apart are dropped. 1000 per city, and each item gets the coordinates of both places and a 1 km grid cell, which the stats use instead of the origin cluster. Output is `data/built/eval/rq4.jsonl` and it ends with `wrote 4000 items`.
+
+### Step 8: build_tpara.py
+
+T_para: the no route spatial reasoning questions reworded by an LLM from another family than Qwen (Cohere Command A, free trial key). To make new paraphrases you need your own key: put `COHERE_API_KEY=...` in a `.env` file in the repo root (it's in .gitignore). Every name and every address in brackets has to come back exactly, and in direction questions the start place has to stay the start, otherwise the question is asked again (3 tries). Route items keep their route text with the reworded question at the end, and distance items get the T_opt options. The paraphrases are saved in `paraphrases/tpara_raw_cohere.jsonl`, which is in git because the model can't be rerun to get exactly the same text. So you don't need a key to rebuild T_para: the script reuses the saved ones and only asks the model about questions that don't have a good paraphrase yet (without a key those just stay out). It prints `paraphrased 3997/4000 questions` and `wrote 7994 items, mean rouge l of the template part 0.522`.
+
+`paraphrases/tpara_check.csv` has 100 random paraphrases for two people to check by hand that they mean the same thing. It's only made once, so a rerun won't wipe the answers.
+
+### option_classifier.py
+
+Checks that T_opt really removes the trick. A classifier only sees the options (rank, size, rounding, whether another option is half or double of it and so on). Trained and tested on the original options it gets everything right, which shows it can find the trick. Trained on the fair training items and tested on T_opt it should be at chance. Takes about a minute:
+
+```
+dis          original 1.000  T_opt 0.245 p=0.69  chance 0.25
+road_length  original 1.000  T_opt 0.177 p=0.88  chance 0.2
+poi2coor     original 1.000  T_opt 0.225 p=0.12  chance 0.2
+T_opt passes
+```
+
+### stats.py
+
+The stats for the results files: accuracy like the paper (mean of task accuracies, SR is the mean of the route and no route halves, distance rows weighted by their quartile), a bootstrap that resamples training seeds and then origin clusters within each city, a sign flip test that flips whole clusters, and Holm correction. Running it directly tests it on fake results: it should find the planted gain (A = 0.132) and wrongly reject only about 5 percent of the time when there is no difference (11/200).
+
+### score.py
+
+Scores a model on one eval file and writes `data/built/results/<name>__<cond>__<protocol>.jsonl` with one line per item (prediction, gold letter, correct, and the scores or the raw answers). Three ways to score:
+
+- ll: the option letter the model gives the highest probability right after "Answer:". This is the main one.
+- gen: the paper's own way, copied from their run_eval.py. The model writes an answer and their regex picks the letter, and no route items get their three round prompt. Their third round sends an empty message unless their include_answer_prompt_final flag is on, so here that flag is `--answer_suffix` and it's off by default like in their code.
+- open: for T_open. Distance answers can only be digits and direction answers are the most likely of the four words.
+
+```
+python src/score.py --model Qwen/Qwen2.5-0.5B-Instruct --name base05 --cond sample --protocol ll
+python src/score.py --model Qwen/Qwen2.5-0.5B-Instruct --adapter runs/q05_f_ft --name ft05 --cond topt --protocol ll
+```
+
+`--cond` is one of sample, topt, fictional, rq4 and topen. `--limit 40` does a quick test on 40 items spread over the file.
+
+### Training
+
+Training uses LLaMA-Factory 0.9.5 with the settings in `configs/qwen_lora.yaml` (LoRA rank 16 on all layers, 1 epoch, lr 2e-4, max length 2048 with packing). Pick the training set and output folder on the command line:
+
+```
+llamafactory-cli train configs/qwen_lora.yaml dataset=f_ft output_dir=runs/q05_f_ft
+```
+
+The config uses Qwen2.5-0.5B-Instruct. For the real runs add `model_name_or_path=Qwen/Qwen2.5-1.5B-Instruct`. On a laptop RTX 3060 (6 GB) the 0.5B run on f_ft is 653 steps and took 3 h 42 min (final training loss 0.40). Scoring the whole eval sample (14,687 items) with ll takes about 9 minutes for the 0.5B model on the same laptop, a bit longer with an adapter. Windows has no flash attention 2, so the config uses sdpa.
+
 ### utils.py
 
-Shared stuff: paths, loaders for the json and csv files, the token estimate, grouping training items by source, the answer gap, and the parser that finds the origin place in a question. The parser counts brackets because some place names have brackets in them, e.g. "Gowanus Expressway (HOV)".
+Shared stuff: paths, loaders for the json and csv files, the token estimate, grouping training items by source, the answer gap, the parser that finds the origin place in a question, and `map_open` for the T_open answers. The parser counts brackets because some place names have brackets in them, e.g. "Gowanus Expressway (HOV)".
 
 ## Folders
 
 ```
 lit/          paper, proposal, pitch slides
 src/          the scripts
+configs/      training settings for llamafactory
+paraphrases/  the T_para paraphrases and the hand check sheet
 data/         dataset (not in git)
 data/built/   generated files (not in git)
 ```
+
+## Data and license
+
+The questions come from CityGPT-Data (Feng et al., KDD '25, https://huggingface.co/datasets/Tianhui-Liu/CityGPT-Data), which is under the MIT license, like the CityGPT code (https://github.com/tsinghua-fib-lab/CityGPT). The paraphrases in `paraphrases/` are derived from those questions, and the parts of `src/score.py` marked "code from paper gh" come from the CityGPT repo. If you use any of it, cite the paper.

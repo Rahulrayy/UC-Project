@@ -1,0 +1,45 @@
+# lora settings shared by every training run and frozen after stage 1
+# run from the repo root with llamafactory-cli train configs/qwen_lora.yaml dataset=f_ft output_dir=runs/q05_f_ft
+
+model_name_or_path: Qwen/Qwen2.5-0.5B-Instruct
+trust_remote_code: true
+
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+
+dataset_dir: data/built/train
+dataset: f_ft
+template: qwen
+cutoff_len: 2048
+# pack short items together without letting them see each other
+packing: true
+neat_packing: true
+overwrite_cache: true
+preprocessing_num_workers: 1
+dataloader_num_workers: 0
+
+output_dir: runs/q05_f_ft
+logging_steps: 10
+save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+report_to: none
+
+# about 32k tokens per step which is 16 packed rows of 2048
+# on the laptop that is batch 1 times 16 and on vibranium 2 gpus times batch 2 times 4
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 2.0e-4
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+bf16: true
+gradient_checkpointing: true
+# no flash attention 2 on windows so use sdpa
+flash_attn: sdpa
+seed: 0
