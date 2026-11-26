@@ -203,6 +203,24 @@ llamafactory-cli train configs/qwen_lora.yaml dataset=f_ft output_dir=runs/q05_f
 
 The config uses Qwen2.5-0.5B-Instruct. For the real runs add `model_name_or_path=Qwen/Qwen2.5-1.5B-Instruct`. On a laptop RTX 3060 (6 GB) the 0.5B run on f_ft is 653 steps and took 3 h 42 min (final training loss 0.40). Scoring the whole eval sample (14,687 items) with ll takes about 9 minutes for the 0.5B model on the same laptop, a bit longer with an adapter. Windows has no flash attention 2, so the config uses sdpa.
 
+### Reproduction check: passed
+
+Before the main experiments the fine tuned model has to beat the base model on spatial reasoning (SR) with the paper's own scoring (gen), with p < 0.05 in Beijing and in at least 2 of the 3 cities it never trained on. Otherwise the plan was to switch to a 3B model. Both are Qwen2.5-1.5B-Instruct, the fine tuned one is f_ft seed 0 (`vibranium-runs/q15_f_ft`). To save time it ran on a laptop RTX 3060 with `--sr_half`, which keeps half the SR rows of every city, task and distance bin (seed 0), and each kept row keeps both its route and no route copy, so 3,920 items.
+
+```
+python src/score.py --model Qwen/Qwen2.5-1.5B-Instruct --name base15 --cond sample --protocol gen --sr_half --batch 8
+python src/score.py --model Qwen/Qwen2.5-1.5B-Instruct --adapter vibranium-runs/q15_f_ft --name ft15_s0 --cond sample --protocol gen --sr_half --batch 8
+```
+
+| City | SR base | SR f_ft | Gain | p | Significant |
+|---|---|---|---|---|---|
+| Beijing (trained on) | 0.137 | 0.433 | +0.296 | < 0.001 | yes |
+| London | 0.122 | 0.455 | +0.334 | < 0.001 | yes |
+| New York | 0.137 | 0.431 | +0.294 | < 0.001 | yes |
+| Paris | 0.110 | 0.443 | +0.333 | < 0.001 | yes |
+
+**Passed**: Beijing and all 3 unseen cities, so all experiments stay on 1.5B. p is from the cluster sign flip test in stats.py with 9,999 flips, none of which came close to the real gain, so 1/10,000 is just the smallest value it can give. One thing to keep in mind: the base model's answer couldn't be parsed on 1,705 of the 3,920 items (785 for f_ft), which is why its SR is below chance (0.25), so part of the gain is just learning the answer format. That's why ll is the main scoring. The runs took 1 h 53 min (base) and about 3 h (f_ft) on the laptop.
+
 ### utils.py
 
 Shared stuff: paths, loaders for the json and csv files, the token estimate, grouping training items by source, the answer gap, the parser that finds the origin place in a question, and `map_open` for the T_open answers. The parser counts brackets because some place names have brackets in them, e.g. "Gowanus Expressway (HOV)".

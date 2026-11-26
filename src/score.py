@@ -3,7 +3,10 @@
 
 import argparse
 import csv
+import random
 import re
+import time
+from collections import defaultdict
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -83,6 +86,8 @@ def generate(convs, max_new=100, allowed=None):
                                  top_k=None, repetition_penalty=1.0, pad_token_id=tok.pad_token_id,
                                  prefix_allowed_tokens_fn=limit if allowed else None)
         out += tok.batch_decode(gen[:, n:], skip_special_tokens=True)
+        if (k // args.batch) % 10 == 9 or k + args.batch >= len(convs):
+            print(f"  {time.strftime('%H:%M:%S')} {min(k + args.batch, len(convs))}/{len(convs)} done", flush=True)
     return out
 
 
@@ -102,6 +107,7 @@ def score_gen(items):
     many = [i for i, it in enumerate(items) if it["group"] == "SR" and not it["route"]]
     one = [i for i, it in enumerate(items) if not (it["group"] == "SR" and not it["route"])]
     rounds = {}
+    print(f"one round for {len(one)} items with a route or from city image and semantics", flush=True)
     outs = generate([[{"role": "user", "content": format_example(items[i], args.answer_suffix)}] for i in one])
     for i, o in zip(one, outs):
         rounds[i] = [o]
@@ -113,6 +119,7 @@ def score_gen(items):
         q[i] = format_example(items[i], False, init=False)
         conv[i] = [{"role": "user", "content": q[i] + "\nTo answer the question, please think about the navigation instruction about two locations."}]
     for step in range(3 if many else 0):
+        print(f"round {step + 1} of 3 for {len(many)} no route items", flush=True)
         outs = generate([conv[i] for i in many])
         for i, o in zip(many, outs):
             rounds.setdefault(i, []).append(o)
@@ -167,10 +174,23 @@ ap.add_argument("--cond", required=True, choices=["sample", "topt", "fictional",
 ap.add_argument("--protocol", required=True, choices=["ll", "gen", "open"])
 ap.add_argument("--answer_suffix", action="store_true", help="the paper flag include_answer_prompt_final")
 ap.add_argument("--limit", type=int, default=0, help="only n items spread over the file for a quick test")
+ap.add_argument("--sr_half", action="store_true", help="only half the sr rows for a quicker reproduction check")
 ap.add_argument("--batch", type=int, default=16)
 args = ap.parse_args()
 
 items = read_jsonl(BUILT / "eval" / ("eval_sample.jsonl" if args.cond == "sample" else f"{args.cond}.jsonl"))
+if args.sr_half:
+    # half the rows of every sr task and distance bin picked with seed 0 and a row keeps its route and no route copy
+    rng = random.Random(0)
+    groups = defaultdict(list)
+    for it in items:
+        if it["group"] == "SR" and not it["route"]:
+            groups[(it["city"], it["shape"], it["kind"], it.get("d_bin"))].append(it["row"])
+    keep = set()
+    for key in sorted(groups, key=str):
+        for r in rng.sample(sorted(groups[key]), len(groups[key]) // 2):
+            keep.add((key[0], key[1], key[2], r))
+    items = [it for it in items if it["group"] == "SR" and (it["city"], it["shape"], it["kind"], it["row"]) in keep]
 if args.limit:
     items = items[::len(items) // args.limit][:args.limit]   # every kth item so a quick test still covers all tasks
 tok = AutoTokenizer.from_pretrained(args.model, padding_side="left")
